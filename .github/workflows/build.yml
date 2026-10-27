@@ -1,29 +1,113 @@
-name: AHR UltraFast Mobile - Compile APK from uploaded ZIP
+name: AHR UltraFast Mobile - Build APK (ZIP or source)
+
 on:
   workflow_dispatch:
   push:
     branches: [main, master]
+
+permissions:
+  contents: read
+
 jobs:
-  debug-apk:
+  build-apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - name: Extract project
-        run: mkdir workspace && unzip -q AHR_UltraFast_Mobile_Source.zip -d workspace
-      - uses: actions/setup-java@v4
+      - name: Checkout files
+        uses: actions/checkout@v4
+
+      - name: Find Android project (ZIP or extracted source)
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, sys, tempfile, zipfile
+
+          repo = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          print('Repository top-level files:')
+          for item in sorted(repo.iterdir()):
+              if item.name != '.git':
+                  print('  ' + item.name + ('/' if item.is_dir() else ''))
+
+          def is_project(path):
+              return (path / 'settings.gradle').is_file() and (path / 'app' / 'build.gradle').is_file()
+
+          roots = [repo] if is_project(repo) else []
+          if not roots:
+              roots = [p.parent for p in repo.glob('**/settings.gradle')
+                       if '.git' not in p.parts and is_project(p.parent)]
+
+          if not roots:
+              for archive in sorted(repo.glob('**/*.zip')):
+                  if '.git' in archive.parts or not zipfile.is_zipfile(archive):
+                      continue
+                  print(f'Checking archive: {archive.relative_to(repo)}')
+                  destination = pathlib.Path(tempfile.mkdtemp(prefix='ahr-android-', dir=os.environ['RUNNER_TEMP']))
+                  with zipfile.ZipFile(archive) as z:
+                      # Prevent path traversal when extracting archives.
+                      for info in z.infolist():
+                          resolved = (destination / info.filename).resolve()
+                          if not resolved.is_relative_to(destination.resolve()):
+                              raise SystemExit(f'::error::Unsafe ZIP entry: {info.filename}')
+                      z.extractall(destination)
+                  roots = [destination] if is_project(destination) else []
+                  if not roots:
+                      roots = [p.parent for p in destination.glob('**/settings.gradle') if is_project(p.parent)]
+                  if roots:
+                      break
+
+          if not roots:
+              raise SystemExit('::error::No Android project found. Upload AHR_UltraFast_Mobile_Source.zip to the repository Code tab, at its top level. The ZIP must contain settings.gradle and app/build.gradle.')
+          root = roots[0].resolve()
+          print(f'Android project found at: {root}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f'directory={root}\n')
+          PY
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
-      - name: Install SDK
-        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
-      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform 36
+        run: sdkmanager --install 'platforms;android-36' 'build-tools;35.0.0'
+
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
-      - name: Build APK
-        run: cd workspace && gradle --no-daemon :app:assembleDebug
-      - uses: actions/upload-artifact@v4
+
+      - name: Compile debug APK (save build log)
+        working-directory: ${{ steps.locate.outputs.directory }}
+        shell: bash
+        run: |
+          set -o pipefail
+          if [[ -f ./gradlew ]]; then
+            chmod +x ./gradlew
+            ./gradlew --no-daemon --stacktrace --console=plain :app:assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/ahr-build-log.txt"
+          else
+            gradle --no-daemon --stacktrace --console=plain :app:assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/ahr-build-log.txt"
+          fi
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
         with:
-          name: AHR-UltraFast-Android-APK
-          path: workspace/app/build/outputs/apk/debug/app-debug.apk
+          name: AHR-UltraFast-Mobile-APK
+          path: ${{ steps.locate.outputs.directory }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build error log if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AHR-Build-Error-Log
+          path: ahr-build-log.txt
+          if-no-files-found: warn
+          retention-days: 14
