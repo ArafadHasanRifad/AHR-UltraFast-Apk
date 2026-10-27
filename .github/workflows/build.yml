@@ -1,1 +1,29 @@
-
+name: AHR UltraFast Mobile - Compile APK from uploaded ZIP
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  debug-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract project
+        run: mkdir workspace && unzip -q AHR_UltraFast_Mobile_Source.zip -d workspace
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Build APK
+        run: cd workspace && gradle --no-daemon :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AHR-UltraFast-Android-APK
+          path: workspace/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
